@@ -424,11 +424,31 @@ class RunningHubClient:
                 raise RunningHubAPIError("RunningHub 上传接口返回了非 JSON 响应。") from exc
             if not isinstance(data, dict):
                 raise RunningHubAPIError("RunningHub 上传接口没有返回文件信息。")
+            # RunningHub's ComfyUI upload contract names the canonical loader
+            # path ``fileName`` (for example ``openapi/<hash>.png``). Prefer it
+            # over the more generic ``filename`` field in case both are ever
+            # returned with different meanings.
             uploaded = str(
-                data.get("filename") or data.get("fileName") or data.get("name") or ""
+                data.get("fileName") or data.get("filename") or data.get("name") or ""
             ).strip()
             if not uploaded:
                 raise RunningHubAPIError("RunningHub 上传成功响应中缺少 filename。")
+            # A freshly uploaded ComfyUI resource must be a server-relative
+            # loader path such as api/... or openapi/.... A bare basename can
+            # silently fall back to the AI App's template asset, which wastes
+            # credits while producing the default characters and background.
+            if "/" not in uploaded:
+                raise RunningHubAPIError(
+                    "RunningHub 上传返回了不可用于加载节点的裸文件名："
+                    f"{uploaded}。期望 fileName 类似 openapi/<hash>.<ext>；"
+                    "已在创建生成任务前停止。"
+                )
+            logger.info(
+                "RunningHub media upload selected fileName=%s source=%s content_type=%s",
+                uploaded,
+                Path(filename).name,
+                content_type,
+            )
             return uploaded
         raise RunningHubAPIError("RunningHub 上传在重试后仍然失败。")
 
@@ -743,7 +763,7 @@ def pipeline_summary(record: PipelineRecord) -> dict[str, Any]:
             "音频已经生成。检查 audio_url 后调用 continue_dialogue_pipeline_to_ltx；"
             "可以同时补充准确的 speaker_timeline。"
         )
-    return {
+    result = {
         "ok": record.status != "FAILED",
         "pipeline_id": record.pipeline_id,
         "status": record.status,
@@ -756,6 +776,19 @@ def pipeline_summary(record: PipelineRecord) -> dict[str, Any]:
         "updated_at": record.updated_at,
         "next_action": next_action,
     }
+    # These fields contain no credentials. They make it possible to verify
+    # that an uploaded image really replaced the AI App template asset before
+    # spending credits on another blind retry.
+    uploaded_image = str(record.inputs.get("_uploaded_image_filename") or "")
+    if uploaded_image:
+        result["uploaded_image_filename"] = uploaded_image
+    ltx_submission = record.inputs.get("_ltx_submitted_node_info")
+    if isinstance(ltx_submission, list):
+        result["ltx_submitted_node_info"] = ltx_submission
+    image_preflight = record.inputs.get("_ltx_image_preflight")
+    if isinstance(image_preflight, dict):
+        result["ltx_image_preflight"] = image_preflight
+    return result
 
 
 async def submit_tts_pipeline(
@@ -819,7 +852,9 @@ async def submit_ltx_for_record(
     client: RunningHubClient,
     record: PipelineRecord,
 ) -> PipelineRecord:
-    ltx_map, _ = await resolve_app_nodes(settings, client, settings.ltx, LTX_ROLE_ALIASES)
+    ltx_map, demo = await resolve_app_nodes(
+        settings, client, settings.ltx, LTX_ROLE_ALIASES
+    )
     # This deployed LTX workflow exposes its reference image and driving audio,
     # but node #4 is a *negative* prompt rather than a positive prompt. Do not
     # require a positive prompt node unless the workflow is later changed and
@@ -833,6 +868,58 @@ async def submit_ltx_for_record(
         )
     values = ltx_values(record.image_filename, record.audio_filename, record.inputs)
     nodes = make_node_info_list(ltx_map, values, settings.ltx.extra_node_info)
+    image_target = ltx_map["image"]
+    submitted_image_nodes = [
+        node
+        for node in nodes
+        if str(node.get("nodeId")) == image_target.node_id
+        and str(node.get("fieldName")) == image_target.field_name
+    ]
+    if len(submitted_image_nodes) != 1:
+        raise ConfigurationError(
+            "LTX 图片预检失败：最终 nodeInfoList 中必须且只能包含一个图片覆盖项。"
+        )
+    submitted_image = str(submitted_image_nodes[0].get("fieldValue") or "").strip()
+    if submitted_image != record.image_filename:
+        raise ConfigurationError(
+            "LTX 图片预检失败：提交值与 RunningHub 上传返回的 fileName 不一致。"
+        )
+
+    demo_nodes = [
+        item for item in demo.get("nodeInfoList") or [] if isinstance(item, dict)
+    ]
+    template_image = ""
+    for item in demo_nodes:
+        if (
+            str(item.get("nodeId")) == image_target.node_id
+            and str(item.get("fieldName")) == image_target.field_name
+        ):
+            template_image = str(item.get("defaultValue") or item.get("fieldValue") or "")
+            break
+    if template_image and submitted_image == template_image:
+        raise ConfigurationError(
+            "LTX 图片预检失败：上传图片仍等于 AI App 模板默认图片，"
+            "已在创建任务前停止。"
+        )
+
+    record.inputs["_uploaded_image_filename"] = record.image_filename
+    record.inputs["_ltx_submitted_node_info"] = [dict(node) for node in nodes]
+    record.inputs["_ltx_image_preflight"] = {
+        "ok": True,
+        "nodeId": image_target.node_id,
+        "fieldName": image_target.field_name,
+        "submittedValue": submitted_image,
+        "templateDefaultValue": template_image,
+        "differsFromTemplateDefault": submitted_image != template_image,
+    }
+    await get_store(settings).put(record)
+    logger.info(
+        "LTX image preflight passed node=%s.%s submitted=%s template_default=%s",
+        image_target.node_id,
+        image_target.field_name,
+        submitted_image,
+        template_image,
+    )
     async with _submit_lock:
         task = await client.run_ai_app(settings.ltx, nodes)
     record.ltx_task_id = str(task["taskId"])
@@ -1054,6 +1141,7 @@ async def start_dialogue_video_from_script(
     image_filename = await upload_file_object(
         client, settings, image_file, expected_kind="image"
     )
+    inputs["_uploaded_image_filename"] = image_filename
     return await submit_tts_pipeline(image_filename=image_filename, inputs=inputs)
 
 
@@ -1122,6 +1210,7 @@ async def start_dialogue_video_from_script_url(
     image_filename = await upload_url(
         client, settings, image_url, expected_kind="image"
     )
+    inputs["_uploaded_image_filename"] = image_filename
     return await submit_tts_pipeline(image_filename=image_filename, inputs=inputs)
 
 
@@ -1183,6 +1272,7 @@ async def start_ltx23_from_ready_media(
         upload_file_object(client, settings, image_file, expected_kind="image"),
         upload_file_object(client, settings, audio_file, expected_kind="audio"),
     )
+    inputs["_uploaded_image_filename"] = image_filename
     now = time.time()
     record = PipelineRecord(
         pipeline_id=secrets.token_urlsafe(18),
