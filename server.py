@@ -9,6 +9,7 @@ two-person dialogue video task.
 from __future__ import annotations
 
 import asyncio
+import copy
 import ipaddress
 import json
 import logging
@@ -73,6 +74,22 @@ logger = logging.getLogger("runninghub-qwen-ltx-orchestrator")
 # A non-empty Railway environment variable always takes precedence.
 DEFAULT_QWEN_TTS_WEBAPP_ID = "2051851200194195458"
 DEFAULT_LTX23_WEBAPP_ID = "2048763193677324290"
+DEFAULT_LTX23_WORKFLOW_ID = "2092528826571116545"
+
+# The exported workflow contains two independent positive-prompt fields on
+# node #281. Both must be replaced. If only ``global_prompt`` is changed, the
+# original cafe dialogue in ``local_prompts`` still drives the generated
+# characters, actions, and background.
+LTX_NODE_ROLE_ALIASES = dict(LTX_ROLE_ALIASES)
+LTX_NODE_ROLE_ALIASES["local_prompt"] = (
+    "local_prompts",
+    "local_prompt",
+    "timeline_prompt",
+    "shot_prompt",
+    "局部提示词",
+    "分镜提示词",
+    "时间线提示词",
+)
 
 DEFAULT_QWEN_TTS_NODE_MAP_JSON = json.dumps(
     {
@@ -87,9 +104,8 @@ DEFAULT_LTX23_NODE_MAP_JSON = json.dumps(
     {
         "image": {"nodeId": "61", "fieldName": "image"},
         "audio": {"nodeId": "60", "fieldName": "audio"},
-        # Node #4 is the workflow's CLIP Text Encode (Negative Prompt).
-        # Mapping it as a positive prompt makes LTX suppress the requested
-        # characters, setting, actions, and camera direction.
+        "prompt": {"nodeId": "281", "fieldName": "global_prompt"},
+        "local_prompt": {"nodeId": "281", "fieldName": "local_prompts"},
         "negative_prompt": {"nodeId": "4", "fieldName": "text"},
         "fps": {"nodeId": "62", "fieldName": "value"},
     },
@@ -163,6 +179,9 @@ class Settings:
     upload_path: str
     qwen: AppConfig
     ltx: AppConfig
+    ltx_mode: str
+    ltx_workflow_id: str
+    ltx_workflow_api_file: str
     auto_discover_nodes: bool
     http_timeout_seconds: float
     poll_interval_seconds: float
@@ -195,8 +214,31 @@ class Settings:
         ).strip()
         if require_credentials and not qwen_id:
             raise ConfigurationError("缺少 QWEN_TTS_WEBAPP_ID。")
-        if require_credentials and not ltx_id:
+        if require_credentials and not ltx_id and os.getenv("LTX23_MODE", "workflow").strip().lower() == "ai_app":
             raise ConfigurationError("缺少 LTX23_WEBAPP_ID。")
+
+        ltx_mode = os.getenv("LTX23_MODE", "workflow").strip().lower()
+        if ltx_mode not in {"workflow", "ai_app"}:
+            raise ConfigurationError("LTX23_MODE 只允许 workflow 或 ai_app。")
+        ltx_workflow_id = os.getenv(
+            "LTX23_WORKFLOW_ID", DEFAULT_LTX23_WORKFLOW_ID
+        ).strip()
+        ltx_workflow_api_file = os.getenv(
+            "LTX23_WORKFLOW_API_FILE",
+            str(Path(__file__).resolve().with_name("ltx23_workflow_api.json")),
+        ).strip()
+        if ltx_mode == "workflow" and require_credentials:
+            if not ltx_workflow_id:
+                raise ConfigurationError(
+                    "工作流模式缺少 LTX23_WORKFLOW_ID；请填写 RunningHub 工作流页面 URL 中的数字 ID。"
+                )
+            if not ltx_workflow_api_file:
+                raise ConfigurationError("工作流模式缺少 LTX23_WORKFLOW_API_FILE。")
+            if not Path(ltx_workflow_api_file).is_file():
+                raise ConfigurationError(
+                    "找不到 LTX API 工作流文件："
+                    f"{ltx_workflow_api_file}。请把导出的 API JSON 放入部署仓库。"
+                )
 
         qwen = AppConfig(
             name="qwen_tts",
@@ -217,18 +259,24 @@ class Settings:
                 "QWEN_TTS_EXTRA_NODE_INFO_JSON",
             ),
         )
+        ltx_node_map_raw = os.getenv("LTX23_NODE_MAP_JSON", "").strip()
+        if not ltx_node_map_raw and ltx_mode == "workflow":
+            ltx_node_map_raw = DEFAULT_LTX23_NODE_MAP_JSON
+        elif not ltx_node_map_raw:
+            ltx_node_map_raw = node_map_json_from_env(
+                "LTX23_NODE_MAP_JSON",
+                configured_webapp_id=ltx_id,
+                default_webapp_id=DEFAULT_LTX23_WEBAPP_ID,
+                default_json=DEFAULT_LTX23_NODE_MAP_JSON,
+            )
+
         ltx = AppConfig(
             name="ltx23",
             webapp_id=ltx_id,
             access_password=os.getenv("LTX23_ACCESS_PASSWORD", "").strip(),
             node_map=parse_node_map(
-                node_map_json_from_env(
-                    "LTX23_NODE_MAP_JSON",
-                    configured_webapp_id=ltx_id,
-                    default_webapp_id=DEFAULT_LTX23_WEBAPP_ID,
-                    default_json=DEFAULT_LTX23_NODE_MAP_JSON,
-                ),
-                LTX_ROLE_ALIASES,
+                ltx_node_map_raw,
+                LTX_NODE_ROLE_ALIASES,
                 "LTX23_NODE_MAP_JSON",
             ),
             extra_node_info=parse_extra_node_info(
@@ -243,6 +291,9 @@ class Settings:
             upload_path=upload_path,
             qwen=qwen,
             ltx=ltx,
+            ltx_mode=ltx_mode,
+            ltx_workflow_id=ltx_workflow_id,
+            ltx_workflow_api_file=ltx_workflow_api_file,
             auto_discover_nodes=env_bool("RUNNINGHUB_AUTO_DISCOVER_NODES", True),
             http_timeout_seconds=env_float(
                 "RUNNINGHUB_HTTP_TIMEOUT_SECONDS", 120.0, minimum=10.0, maximum=600.0
@@ -267,6 +318,88 @@ class Settings:
                 "PIPELINE_STATE_TTL_SECONDS", 604800, minimum=3600, maximum=2592000
             ),
         )
+
+
+def load_ltx_workflow_api(settings: Settings) -> dict[str, Any]:
+    """Load and validate the exported ComfyUI API-format workflow."""
+
+    path = Path(settings.ltx_workflow_api_file)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except OSError as exc:
+        raise ConfigurationError(f"无法读取 LTX API 工作流文件：{path}。") from exc
+    except json.JSONDecodeError as exc:
+        raise ConfigurationError(
+            f"LTX API 工作流文件不是有效 JSON：{exc.msg}。"
+        ) from exc
+    if not isinstance(payload, dict) or not payload:
+        raise ConfigurationError("LTX API 工作流必须是以节点 ID 为键的 JSON 对象。")
+    return payload
+
+
+def apply_workflow_overrides(
+    workflow: dict[str, Any], node_info_list: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """Write overrides into a private copy of the actual API workflow."""
+
+    runtime = copy.deepcopy(workflow)
+    for item in node_info_list:
+        node_id = str(item.get("nodeId") or "").strip()
+        field_name = str(item.get("fieldName") or "").strip()
+        if not node_id or not field_name or "fieldValue" not in item:
+            raise ConfigurationError("工作流覆盖项缺少 nodeId、fieldName 或 fieldValue。")
+        node = runtime.get(node_id)
+        if not isinstance(node, dict):
+            raise ConfigurationError(f"LTX API 工作流中不存在节点 #{node_id}。")
+        inputs = node.get("inputs")
+        if not isinstance(inputs, dict):
+            raise ConfigurationError(f"LTX API 工作流节点 #{node_id} 缺少 inputs。")
+        if field_name not in inputs:
+            raise ConfigurationError(
+                f"LTX API 工作流节点 #{node_id} 不包含字段 {field_name!r}。"
+            )
+        inputs[field_name] = item["fieldValue"]
+    return runtime
+
+
+def inspect_ltx_workflow(settings: Settings) -> dict[str, Any]:
+    workflow = load_ltx_workflow_api(settings)
+    resolved = dict(settings.ltx.node_map)
+    required_roles = ("image", "audio", "prompt", "local_prompt")
+    missing = [role for role in required_roles if role not in resolved]
+    available_nodes: list[dict[str, Any]] = []
+    invalid_mappings: list[str] = []
+
+    for role, target in sorted(resolved.items()):
+        node = workflow.get(target.node_id)
+        inputs = node.get("inputs") if isinstance(node, dict) else None
+        if not isinstance(inputs, dict) or target.field_name not in inputs:
+            invalid_mappings.append(role)
+            continue
+        meta = node.get("_meta") if isinstance(node.get("_meta"), dict) else {}
+        available_nodes.append(
+            {
+                "role": role,
+                "nodeId": target.node_id,
+                "nodeName": str(node.get("class_type") or ""),
+                "fieldName": target.field_name,
+                "description": str(meta.get("title") or ""),
+                "defaultValue": inputs.get(target.field_name),
+            }
+        )
+
+    missing.extend(role for role in invalid_mappings if role not in missing)
+    return {
+        "ok": not missing,
+        "mode": "workflow",
+        "workflow_id": settings.ltx_workflow_id,
+        "workflow_api_file": settings.ltx_workflow_api_file,
+        "resolved_node_map": {
+            role: target.to_dict() for role, target in sorted(resolved.items())
+        },
+        "missing_required_roles": missing,
+        "available_nodes": available_nodes,
+    }
 
 
 class RunningHubClient:
@@ -378,6 +511,41 @@ class RunningHubClient:
         if isinstance(prompt_tips, dict) and prompt_tips.get("node_errors"):
             raise RunningHubAPIError(
                 f"RunningHub 节点校验失败：{prompt_tips['node_errors']}"
+            )
+        return data
+
+    async def run_workflow(
+        self,
+        *,
+        workflow_id: str,
+        node_info_list: list[dict[str, Any]],
+        access_password: str = "",
+    ) -> dict[str, Any]:
+        """Run the exported workflow directly, bypassing the AI App layer."""
+
+        payload: dict[str, Any] = {
+            "workflowId": workflow_id,
+            "nodeInfoList": node_info_list,
+            "addMetadata": False,
+        }
+        if access_password:
+            payload["accessPassword"] = access_password
+        data = await self.request_json(
+            "POST", "/task/openapi/create", payload=payload
+        )
+        if not isinstance(data, dict) or not data.get("taskId"):
+            raise RunningHubAPIError(
+                "RunningHub 工作流 API 未返回 taskId，任务没有成功创建。"
+            )
+        prompt_tips = data.get("promptTips")
+        if isinstance(prompt_tips, str):
+            try:
+                prompt_tips = json.loads(prompt_tips)
+            except json.JSONDecodeError:
+                pass
+        if isinstance(prompt_tips, dict) and prompt_tips.get("node_errors"):
+            raise RunningHubAPIError(
+                f"RunningHub 工作流节点校验失败：{prompt_tips['node_errors']}"
             )
         return data
 
@@ -675,6 +843,10 @@ def ltx_values(image_filename: str, audio_filename: str, inputs: dict[str, Any])
         "image": image_filename,
         "audio": audio_filename,
         "prompt": full_prompt,
+        # PromptRelayEncode keeps a separate local timeline prompt. Replacing
+        # it with the same request prevents the template cafe scene and its
+        # template characters from leaking into the generated video.
+        "local_prompt": full_prompt,
         "negative_prompt": str(inputs.get("negative_prompt") or ""),
         "width": int(inputs.get("width") or 0) or None,
         "height": int(inputs.get("height") or 0) or None,
@@ -788,6 +960,12 @@ def pipeline_summary(record: PipelineRecord) -> dict[str, Any]:
     image_preflight = record.inputs.get("_ltx_image_preflight")
     if isinstance(image_preflight, dict):
         result["ltx_image_preflight"] = image_preflight
+    submission_mode = str(record.inputs.get("_ltx_submission_mode") or "")
+    if submission_mode:
+        result["ltx_submission_mode"] = submission_mode
+    workflow_preflight = record.inputs.get("_ltx_workflow_preflight")
+    if isinstance(workflow_preflight, dict):
+        result["ltx_workflow_preflight"] = workflow_preflight
     return result
 
 
@@ -852,14 +1030,23 @@ async def submit_ltx_for_record(
     client: RunningHubClient,
     record: PipelineRecord,
 ) -> PipelineRecord:
-    ltx_map, demo = await resolve_app_nodes(
-        settings, client, settings.ltx, LTX_ROLE_ALIASES
+    workflow_template: dict[str, Any] | None = None
+    if settings.ltx_mode == "workflow":
+        # Workflow mode uses the explicit map against the exported API JSON;
+        # it never asks the published AI App to infer or override image nodes.
+        ltx_map = dict(settings.ltx.node_map)
+        workflow_template = load_ltx_workflow_api(settings)
+        demo: dict[str, Any] = {"nodeInfoList": []}
+    else:
+        ltx_map, demo = await resolve_app_nodes(
+            settings, client, settings.ltx, LTX_NODE_ROLE_ALIASES
+        )
+    required_roles = (
+        ("image", "audio", "prompt", "local_prompt")
+        if settings.ltx_mode == "workflow"
+        else ("image", "audio", "prompt")
     )
-    # This deployed LTX workflow exposes its reference image and driving audio,
-    # but node #4 is a *negative* prompt rather than a positive prompt. Do not
-    # require a positive prompt node unless the workflow is later changed and
-    # an explicit mapping is configured for one.
-    missing = [role for role in ("image", "audio") if role not in ltx_map]
+    missing = [role for role in required_roles if role not in ltx_map]
     if missing:
         raise ConfigurationError(
             "无法确定 LTX 2.3 必需节点："
@@ -867,6 +1054,24 @@ async def submit_ltx_for_record(
             + "。请调用 inspect_dialogue_pipeline 并配置 LTX23_NODE_MAP_JSON。"
         )
     values = ltx_values(record.image_filename, record.audio_filename, record.inputs)
+    if workflow_template is not None and "negative_prompt" in ltx_map:
+        negative_target = ltx_map["negative_prompt"]
+        negative_node = workflow_template.get(negative_target.node_id)
+        negative_inputs = (
+            negative_node.get("inputs")
+            if isinstance(negative_node, dict)
+            else None
+        )
+        template_negative = (
+            str(negative_inputs.get(negative_target.field_name) or "").strip()
+            if isinstance(negative_inputs, dict)
+            else ""
+        )
+        requested_negative = str(values.get("negative_prompt") or "").strip()
+        if template_negative and requested_negative:
+            values["negative_prompt"] = f"{template_negative}, {requested_negative}"
+        elif template_negative:
+            values["negative_prompt"] = template_negative
     nodes = make_node_info_list(ltx_map, values, settings.ltx.extra_node_info)
     image_target = ltx_map["image"]
     submitted_image_nodes = [
@@ -885,25 +1090,70 @@ async def submit_ltx_for_record(
             "LTX 图片预检失败：提交值与 RunningHub 上传返回的 fileName 不一致。"
         )
 
-    demo_nodes = [
-        item for item in demo.get("nodeInfoList") or [] if isinstance(item, dict)
-    ]
     template_image = ""
-    for item in demo_nodes:
-        if (
-            str(item.get("nodeId")) == image_target.node_id
-            and str(item.get("fieldName")) == image_target.field_name
-        ):
-            template_image = str(item.get("defaultValue") or item.get("fieldValue") or "")
-            break
-    if template_image and submitted_image == template_image:
+    if workflow_template is not None:
+        template_node = workflow_template.get(image_target.node_id)
+        template_inputs = (
+            template_node.get("inputs") if isinstance(template_node, dict) else None
+        )
+        if isinstance(template_inputs, dict):
+            template_image = str(template_inputs.get(image_target.field_name) or "")
+    else:
+        demo_nodes = [
+            item
+            for item in demo.get("nodeInfoList") or []
+            if isinstance(item, dict)
+        ]
+        for item in demo_nodes:
+            if (
+                str(item.get("nodeId")) == image_target.node_id
+                and str(item.get("fieldName")) == image_target.field_name
+            ):
+                template_image = str(
+                    item.get("defaultValue") or item.get("fieldValue") or ""
+                )
+                break
+    if (
+        settings.ltx_mode == "ai_app"
+        and template_image
+        and submitted_image == template_image
+    ):
         raise ConfigurationError(
             "LTX 图片预检失败：上传图片仍等于 AI App 模板默认图片，"
             "已在创建任务前停止。"
         )
 
+    validated_workflow: dict[str, Any] | None = None
+    workflow_preflight: dict[str, Any] | None = None
+    if workflow_template is not None:
+        validated_workflow = apply_workflow_overrides(workflow_template, nodes)
+        runtime_node = validated_workflow.get(image_target.node_id)
+        runtime_inputs = (
+            runtime_node.get("inputs") if isinstance(runtime_node, dict) else None
+        )
+        runtime_image = (
+            str(runtime_inputs.get(image_target.field_name) or "")
+            if isinstance(runtime_inputs, dict)
+            else ""
+        )
+        if runtime_image != submitted_image:
+            raise ConfigurationError(
+                "LTX 工作流预检失败：完整 workflow 中的 #61 图片值没有被正确改写。"
+            )
+        workflow_preflight = {
+            "ok": True,
+            "workflowId": settings.ltx_workflow_id,
+            "nodeId": image_target.node_id,
+            "fieldName": image_target.field_name,
+            "runtimeValue": runtime_image,
+            "workflowOverridesTemplate": runtime_image != template_image,
+            "positivePromptNode": ltx_map["prompt"].to_dict(),
+            "localPromptNode": ltx_map["local_prompt"].to_dict(),
+        }
+
     record.inputs["_uploaded_image_filename"] = record.image_filename
     record.inputs["_ltx_submitted_node_info"] = [dict(node) for node in nodes]
+    record.inputs["_ltx_submission_mode"] = settings.ltx_mode
     record.inputs["_ltx_image_preflight"] = {
         "ok": True,
         "nodeId": image_target.node_id,
@@ -912,6 +1162,8 @@ async def submit_ltx_for_record(
         "templateDefaultValue": template_image,
         "differsFromTemplateDefault": submitted_image != template_image,
     }
+    if workflow_preflight is not None:
+        record.inputs["_ltx_workflow_preflight"] = workflow_preflight
     await get_store(settings).put(record)
     logger.info(
         "LTX image preflight passed node=%s.%s submitted=%s template_default=%s",
@@ -921,7 +1173,14 @@ async def submit_ltx_for_record(
         template_image,
     )
     async with _submit_lock:
-        task = await client.run_ai_app(settings.ltx, nodes)
+        if validated_workflow is not None:
+            task = await client.run_workflow(
+                workflow_id=settings.ltx_workflow_id,
+                node_info_list=nodes,
+                access_password=settings.ltx.access_password,
+            )
+        else:
+            task = await client.run_ai_app(settings.ltx, nodes)
     record.ltx_task_id = str(task["taskId"])
     record.status = "LTX_SUBMITTED"
     return await get_store(settings).put(record)
@@ -1056,24 +1315,30 @@ mcp = FastMCP("RunningHub Qwen3-TTS + LTX 2.3", instructions=SERVER_INSTRUCTIONS
     }
 )
 async def inspect_dialogue_pipeline() -> dict[str, Any]:
-    """只读检查 Qwen3-TTS 与 LTX 2.3 两个应用的节点映射，不消耗生成额度。"""
+    """只读检查 Qwen3-TTS 与 LTX 2.3 节点映射，不创建任务。"""
 
     settings = Settings.from_env()
     client = RunningHubClient(settings)
-    qwen_result, ltx_result = await asyncio.gather(
-        inspect_one_app(
-            settings, client, settings.qwen, TTS_ROLE_ALIASES, ("script",)
-        ),
-        inspect_one_app(
-            settings, client, settings.ltx, LTX_ROLE_ALIASES, ("image", "audio")
-        ),
+    qwen_result = await inspect_one_app(
+        settings, client, settings.qwen, TTS_ROLE_ALIASES, ("script",)
     )
+    if settings.ltx_mode == "workflow":
+        ltx_result = inspect_ltx_workflow(settings)
+    else:
+        ltx_result = await inspect_one_app(
+            settings,
+            client,
+            settings.ltx,
+            LTX_NODE_ROLE_ALIASES,
+            ("image", "audio", "prompt"),
+        )
     return {
         "ok": qwen_result["ok"] and ltx_result["ok"],
         "base_url": settings.base_url,
         "qwen_tts": qwen_result,
         "ltx23": ltx_result,
         "state_file": settings.state_file,
+        "inspection_created_task": False,
         "generation_will_consume_credits": True,
     }
 
@@ -1427,6 +1692,11 @@ async def health(_: Request) -> JSONResponse:
             "runninghub_api_key_configured": bool(settings and settings.api_key),
             "qwen_tts_webapp_id": settings.qwen.webapp_id if settings else "",
             "ltx23_webapp_id": settings.ltx.webapp_id if settings else "",
+            "ltx23_mode": settings.ltx_mode if settings else "",
+            "ltx23_workflow_id": settings.ltx_workflow_id if settings else "",
+            "ltx23_workflow_api_file": (
+                settings.ltx_workflow_api_file if settings else ""
+            ),
             "state_file": settings.state_file if settings else "",
             "configuration_error": config_error,
         }
