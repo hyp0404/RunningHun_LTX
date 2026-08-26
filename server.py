@@ -87,7 +87,10 @@ DEFAULT_LTX23_NODE_MAP_JSON = json.dumps(
     {
         "image": {"nodeId": "61", "fieldName": "image"},
         "audio": {"nodeId": "60", "fieldName": "audio"},
-        "prompt": {"nodeId": "4", "fieldName": "text"},
+        # Node #4 is the workflow's CLIP Text Encode (Negative Prompt).
+        # Mapping it as a positive prompt makes LTX suppress the requested
+        # characters, setting, actions, and camera direction.
+        "negative_prompt": {"nodeId": "4", "fieldName": "text"},
         "fps": {"nodeId": "62", "fieldName": "value"},
     },
     separators=(",", ":"),
@@ -817,7 +820,11 @@ async def submit_ltx_for_record(
     record: PipelineRecord,
 ) -> PipelineRecord:
     ltx_map, _ = await resolve_app_nodes(settings, client, settings.ltx, LTX_ROLE_ALIASES)
-    missing = [role for role in ("image", "audio", "prompt") if role not in ltx_map]
+    # This deployed LTX workflow exposes its reference image and driving audio,
+    # but node #4 is a *negative* prompt rather than a positive prompt. Do not
+    # require a positive prompt node unless the workflow is later changed and
+    # an explicit mapping is configured for one.
+    missing = [role for role in ("image", "audio") if role not in ltx_map]
     if missing:
         raise ConfigurationError(
             "无法确定 LTX 2.3 必需节点："
@@ -971,7 +978,7 @@ async def inspect_dialogue_pipeline() -> dict[str, Any]:
             settings, client, settings.qwen, TTS_ROLE_ALIASES, ("script",)
         ),
         inspect_one_app(
-            settings, client, settings.ltx, LTX_ROLE_ALIASES, ("image", "audio", "prompt")
+            settings, client, settings.ltx, LTX_ROLE_ALIASES, ("image", "audio")
         ),
     )
     return {
