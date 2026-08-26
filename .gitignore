@@ -1,8 +1,6 @@
 __pycache__/
 *.py[cod]
 .env
-.git/
-.github/
-tests/
+pipelines.json
 *.zip
 

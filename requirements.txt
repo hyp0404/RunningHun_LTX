@@ -3,3 +3,4 @@ httpx==0.28.1
 pydantic==2.13.4
 python-dotenv==1.2.3
 uvicorn==0.52.4
+
