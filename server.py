@@ -65,6 +65,52 @@ logging.basicConfig(
 logger = logging.getLogger("runninghub-qwen-ltx-orchestrator")
 
 
+# Known-good input mappings for the two RunningHub AI Apps used by this
+# deployment. RunningHub exposes the Qwen text inputs only as generic
+# ``String / inStr`` fields, so semantic auto-discovery cannot distinguish the
+# dialogue script from the speaker voice prompts. These defaults are applied
+# only while the configured WebApp IDs still match the known applications.
+# A non-empty Railway environment variable always takes precedence.
+DEFAULT_QWEN_TTS_WEBAPP_ID = "2051851200194195458"
+DEFAULT_LTX23_WEBAPP_ID = "2048763193677324290"
+
+DEFAULT_QWEN_TTS_NODE_MAP_JSON = json.dumps(
+    {
+        "script": {"nodeId": "10", "fieldName": "inStr"},
+        "voice_a": {"nodeId": "14", "fieldName": "inStr"},
+        "voice_b": {"nodeId": "15", "fieldName": "inStr"},
+    },
+    separators=(",", ":"),
+)
+
+DEFAULT_LTX23_NODE_MAP_JSON = json.dumps(
+    {
+        "image": {"nodeId": "61", "fieldName": "image"},
+        "audio": {"nodeId": "60", "fieldName": "audio"},
+        "prompt": {"nodeId": "4", "fieldName": "text"},
+        "fps": {"nodeId": "62", "fieldName": "value"},
+    },
+    separators=(",", ":"),
+)
+
+
+def node_map_json_from_env(
+    variable_name: str,
+    *,
+    configured_webapp_id: str,
+    default_webapp_id: str,
+    default_json: str,
+) -> str:
+    """Return an explicit override, or the known mapping for the default app."""
+
+    configured = os.getenv(variable_name, "").strip()
+    if configured:
+        return configured
+    if configured_webapp_id == default_webapp_id:
+        return default_json
+    return ""
+
+
 class RunningHubAPIError(RuntimeError):
     """Sanitized RunningHub error safe to return through MCP."""
 
@@ -139,9 +185,10 @@ class Settings:
         if not upload_path.startswith("/"):
             upload_path = f"/{upload_path}"
 
-        qwen_id = os.getenv("QWEN_TTS_WEBAPP_ID", "2051851200194195458").strip()
+        qwen_id = os.getenv("QWEN_TTS_WEBAPP_ID", DEFAULT_QWEN_TTS_WEBAPP_ID).strip()
         ltx_id = os.getenv(
-            "LTX23_WEBAPP_ID", os.getenv("RUNNINGHUB_WEBAPP_ID", "2048763193677324290")
+            "LTX23_WEBAPP_ID",
+            os.getenv("RUNNINGHUB_WEBAPP_ID", DEFAULT_LTX23_WEBAPP_ID),
         ).strip()
         if require_credentials and not qwen_id:
             raise ConfigurationError("缺少 QWEN_TTS_WEBAPP_ID。")
@@ -153,7 +200,12 @@ class Settings:
             webapp_id=qwen_id,
             access_password=os.getenv("QWEN_TTS_ACCESS_PASSWORD", "").strip(),
             node_map=parse_node_map(
-                os.getenv("QWEN_TTS_NODE_MAP_JSON", ""),
+                node_map_json_from_env(
+                    "QWEN_TTS_NODE_MAP_JSON",
+                    configured_webapp_id=qwen_id,
+                    default_webapp_id=DEFAULT_QWEN_TTS_WEBAPP_ID,
+                    default_json=DEFAULT_QWEN_TTS_NODE_MAP_JSON,
+                ),
                 TTS_ROLE_ALIASES,
                 "QWEN_TTS_NODE_MAP_JSON",
             ),
@@ -167,7 +219,12 @@ class Settings:
             webapp_id=ltx_id,
             access_password=os.getenv("LTX23_ACCESS_PASSWORD", "").strip(),
             node_map=parse_node_map(
-                os.getenv("LTX23_NODE_MAP_JSON", ""),
+                node_map_json_from_env(
+                    "LTX23_NODE_MAP_JSON",
+                    configured_webapp_id=ltx_id,
+                    default_webapp_id=DEFAULT_LTX23_WEBAPP_ID,
+                    default_json=DEFAULT_LTX23_NODE_MAP_JSON,
+                ),
                 LTX_ROLE_ALIASES,
                 "LTX23_NODE_MAP_JSON",
             ),
