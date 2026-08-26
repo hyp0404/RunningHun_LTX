@@ -1,8 +1,26 @@
+# Python cache and local virtual environments
 __pycache__/
 *.py[cod]
+.venv/
+venv/
+
+# Local secrets and development configuration
 .env
+.env.*
+!.env.example
+
+# Source-control and editor metadata
 .git/
 .github/
-tests/
-*.zip
+.idea/
+.vscode/
 
+# Tests and local build artifacts
+tests/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.zip
+*.log
+
+# Do not add *.json here: ltx23_workflow_api.json is required at runtime.
