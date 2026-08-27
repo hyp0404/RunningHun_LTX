@@ -1,20 +1,4 @@
 {
-  "53": {
-    "inputs": {
-      "filename_prefix": "output",
-      "format": "auto",
-      "codec": "auto",
-      "fw_video_preview": "",
-      "video": [
-        "128",
-        0
-      ]
-    },
-    "class_type": "SaveVideo",
-    "_meta": {
-      "title": "💾 Save Video"
-    }
-  },
   "60": {
     "inputs": {
       "audio": "7dcdaa1d35f5516d24b743f2530e43a081476453b5d9c475ed095ff847988b00.flac",
@@ -912,40 +896,6 @@
     "class_type": "LTXVAudioVAEDecode",
     "_meta": {
       "title": "LTXV Audio VAE Decode"
-    }
-  },
-  "128": {
-    "inputs": {
-      "fps": [
-        "62",
-        0
-      ],
-      "bit_depth": 8,
-      "images": [
-        "126",
-        0
-      ],
-      "audio": [
-        "127",
-        0
-      ]
-    },
-    "class_type": "CreateVideo",
-    "_meta": {
-      "title": "Create Video"
-    }
-  },
-  "129": {
-    "inputs": {
-      "text": "241",
-      "anything": [
-        "133",
-        0
-      ]
-    },
-    "class_type": "easy showAnything",
-    "_meta": {
-      "title": "Show Any"
     }
   },
   "133": {
