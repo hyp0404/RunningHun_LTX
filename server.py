@@ -525,14 +525,16 @@ class RunningHubClient:
         *,
         payload: dict[str, Any] | None = None,
         params: dict[str, Any] | None = None,
+        include_api_key: bool = True,
     ) -> Any:
         method = method.upper()
         request_payload = dict(payload or {})
         request_params = dict(params or {})
-        if method == "GET":
-            request_params["apiKey"] = self.settings.api_key
-        else:
-            request_payload["apiKey"] = self.settings.api_key
+        if include_api_key:
+            if method == "GET":
+                request_params["apiKey"] = self.settings.api_key
+            else:
+                request_payload["apiKey"] = self.settings.api_key
 
         headers = dict(self.headers)
         if method != "GET":
@@ -644,8 +646,64 @@ class RunningHubClient:
         return data
 
     async def get_outputs(self, task_id: str) -> Any:
-        return await self.request_json(
-            "POST", "/task/openapi/outputs", payload={"taskId": task_id}
+        """Return task outputs, with V2 fallback for exported workflows.
+
+        RunningHub's legacy ``/task/openapi/outputs`` endpoint can continue to
+        return code 804 for a successfully completed task created through
+        ``/task/openapi/create``.  The V2 query endpoint reports the canonical
+        task status and result URLs for both AI Apps and exported workflows.
+        Keep the legacy endpoint first for backwards compatibility, then use
+        V2 whenever legacy still claims that the task is running.
+        """
+
+        try:
+            return await self.request_json(
+                "POST", "/task/openapi/outputs", payload={"taskId": task_id}
+            )
+        except RunningHubAPIError as exc:
+            if str(exc.code) != "804":
+                raise
+
+        data = await self.request_json(
+            "POST",
+            "/openapi/v2/query",
+            payload={"taskId": task_id},
+            include_api_key=False,
+        )
+        if not isinstance(data, dict):
+            raise RunningHubAPIError("RunningHub V2 查询返回格式不正确。")
+
+        status = str(data.get("status") or "").strip().upper()
+        if status == "SUCCESS":
+            results = data.get("results") or []
+            if not isinstance(results, list):
+                raise RunningHubAPIError("RunningHub V2 成功响应缺少 results 列表。")
+            # Normalize V2 fields to the legacy shape consumed by
+            # extract_media_urls() in orchestrator_core.
+            normalized: list[dict[str, Any]] = []
+            for item in results:
+                if not isinstance(item, dict):
+                    continue
+                converted = dict(item)
+                if item.get("url") and not item.get("fileUrl"):
+                    converted["fileUrl"] = item["url"]
+                if item.get("outputType") and not item.get("fileType"):
+                    converted["fileType"] = item["outputType"]
+                normalized.append(converted)
+            return normalized
+
+        if status in {"FAILED", "FAILURE", "ERROR", "CANCELED", "CANCELLED"}:
+            reason = str(
+                data.get("errorMessage")
+                or data.get("failedReason")
+                or data.get("errorCode")
+                or "RunningHub V2 任务失败。"
+            )
+            raise RunningHubAPIError(reason, code="805")
+
+        raise RunningHubAPIError(
+            f"RunningHub V2 任务仍在运行（status={status or 'UNKNOWN'}）。",
+            code="804",
         )
 
     async def upload_bytes(self, content: bytes, filename: str, content_type: str) -> str:
