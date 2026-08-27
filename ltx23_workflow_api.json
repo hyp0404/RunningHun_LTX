@@ -1,4 +1,33 @@
 {
+  "4": {
+    "inputs": {
+      "text": "(字幕。中文字幕:1.5)camera zooming out, low resolution, blurry, grainy, pixelated, wide shot, distant view, shallow focus, motion blur, low detail, flat lighting, dark scene, noisy image, poor texture, soft edges, muted colors, overexposed, underexposed, static, silent, no movement, blurry, low quality, still frame, frames, watermark, overlay, titles, has subtitles, Deformed, scene cut, scene transition, no movement, glitching, low resolution, extra hands appearing, extra limbs appearing, warping, extra body parts",
+      "clip": [
+        "86",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Negative Prompt)"
+    }
+  },
+  "53": {
+    "inputs": {
+      "filename_prefix": "output",
+      "format": "auto",
+      "codec": "auto",
+      "fw_video_preview": "",
+      "video": [
+        "128",
+        0
+      ]
+    },
+    "class_type": "SaveVideo",
+    "_meta": {
+      "title": "💾 Save Video"
+    }
+  },
   "60": {
     "inputs": {
       "audio": "7dcdaa1d35f5516d24b743f2530e43a081476453b5d9c475ed095ff847988b00.flac",
@@ -291,6 +320,10 @@
       "positive": [
         "281",
         1
+      ],
+      "negative": [
+        "4",
+        0
       ]
     },
     "class_type": "LTXVConditioning",
@@ -898,6 +931,40 @@
       "title": "LTXV Audio VAE Decode"
     }
   },
+  "128": {
+    "inputs": {
+      "fps": [
+        "62",
+        0
+      ],
+      "bit_depth": 8,
+      "images": [
+        "126",
+        0
+      ],
+      "audio": [
+        "127",
+        0
+      ]
+    },
+    "class_type": "CreateVideo",
+    "_meta": {
+      "title": "Create Video"
+    }
+  },
+  "129": {
+    "inputs": {
+      "text": "241",
+      "anything": [
+        "133",
+        0
+      ]
+    },
+    "class_type": "easy showAnything",
+    "_meta": {
+      "title": "Show Any"
+    }
+  },
   "133": {
     "inputs": {
       "value": "b *  (round(a / 1000) / 8  * 8 ) + 1  ",
@@ -963,7 +1030,7 @@
   },
   "281": {
     "inputs": {
-      "global_prompt": "A single continuous cinematic shot based strictly on the provided first frame.\nPreserve the exact same two characters, faces, hairstyles, costumes, body\nproportions, left-right positions, ancient city tower, brick parapet, distant\nmountains, sunset sky and warm golden lighting.\n\nThe woman remains on the left and speaks softly with restrained emotion while\nthe wandering swordsman listens. He then replies calmly while she listens.\nOnly subtle lip movement, blinking, breathing and gentle wind movement.\nFixed medium two-shot, no camera movement, no scene change.",
+      "global_prompt": "A single continuous cinematic 10-second LTX-2.3 dual-character dialogue image-to-video shot based on the provided first frame, mixing realistic live-action and anime character styles while preserving stable identity, stable left-right positioning, and smooth conversational continuity.\n\nThe scene takes place at a warm sunlit café table near tall windows, with soft afternoon light, plants, wooden tabletop reflections, a white coffee cup, a red iced drink with straw, and a small flower vase in the center.\n\nOn the left, a young adult blonde realistic woman in a soft pink lace dress sits gracefully with one hand near her chin, facing the anime girl with a gentle amused smile.\n\nOn the right, a cute blue-haired anime girl in a pale-blue sailor-style outfit sits facing the blonde woman, smiling brightly and gesturing with one hand as she talks.\n\nKeep the blonde woman always on the left and the blue-haired anime girl always on the right. Keep both characters seated at the table, maintaining eye contact, natural facial expressions, subtle hand gestures, slight hair movement, soft clothing motion, and warm café atmosphere.\n\nThe tone is funny, light, friendly, and slightly surreal, like a real person having a casual conversation with an anime girl. Clear Mandarin Chinese dialogue with natural lip sync, no subtitles, no text on screen.",
       "local_prompts": "[0-4s] The camera holds a medium two-shot across the café table. The blonde woman rests her chin lightly on her hand and looks at the anime girl with a curious smile. The anime girl leans forward, gives a small excited wave, and says in Mandarin Chinese with a cheerful voice: “这个草莓冰茶好神奇，我才喝一口，就感觉整个人都亮起来了。”\n\n|\n\n[4-8s] The camera slowly pushes closer while keeping both characters in frame. The blonde woman blinks, smiles wider, and glances at the red drink. She replies in Mandarin Chinese with a soft amused voice: “可能是太甜了，不是魔法。” The anime girl pauses for a tiny beat, then looks down at the drink with serious curiosity.\n\n|\n\n[8-12s] The anime girl gently touches the straw, then looks back at the blonde woman. She says in Mandarin Chinese with a playful but sincere tone: “可是你们人类好厉害，连普通饮料都能让人心情变好。” Her hand gesture stays small and natural, and the drink remains stable on the table.\n\n|\n\n[12-16s] The blonde woman laughs quietly, lifts her coffee cup slightly without drinking, and answers with a teasing smile: “那是因为你今天心情本来就不错。” The anime girl blushes a little, smiles awkwardly, and lowers her raised hand. Soft sunlight flickers across their hair and the tabletop.\n\n|\n\n[16-20s] The camera settles into a closer two-shot. The anime girl looks at the coffee cup, then back at the blonde woman, and says with hopeful curiosity: “那下次，我可以也试试你的咖啡吗？” The blonde woman looks at her warmly and raises an eyebrow, amused. Both characters hold eye contact and smile as the café ambience continues.",
       "segment_lengths": "",
       "epsilon": 0.010000000000000002,
@@ -1007,6 +1074,14 @@
       "inplace": true,
       "model": [
         "281",
+        0
+      ],
+      "nag_cond_video": [
+        "4",
+        0
+      ],
+      "nag_cond_audio": [
+        "4",
         0
       ]
     },
