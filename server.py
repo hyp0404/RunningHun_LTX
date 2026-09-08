@@ -125,7 +125,7 @@ MANDATORY_NO_TEXT_NEGATIVE = (
 # semantic no-writing guard in the global visual prompt so the same protection
 # remains active without inventing or overriding a disconnected workflow node.
 GLOBAL_NO_WRITING_GUARD = (
-    "Keep every frame limited to the photographed people and environment. "
+    "Maintain visual continuity with the reference while following the requested scene changes. "
     "All visible surfaces remain clean and unmarked, with no writing, "
     "typography, glyphs, signage, labels, logos, watermarks, graphic overlays, "
     "title cards, credits, speech bubbles, or interface elements."
@@ -1036,6 +1036,16 @@ def sanitize_visual_prompt(value: str, dialogue_script: str = "") -> str:
     return "\n".join(line for line in cleaned_lines if line).strip()
 
 
+def requested_motion(inputs: dict[str, Any], key: str) -> str:
+    """Ignore legacy automatic defaults retained in saved pipeline records."""
+    value = str(inputs.get(key) or "").strip()
+    legacy = {
+        "action": "说话者自然张嘴并有小幅表情和手势；未说话者自然倾听",
+        "camera": "固定中近景，轻微自然呼吸感，不切镜",
+    }
+    return "" if value == legacy.get(key) else value
+
+
 def build_global_visual_prompt(inputs: dict[str, Any]) -> str:
     """Build node #281 global_prompt without dialogue literals or captions."""
 
@@ -1053,8 +1063,8 @@ def build_global_visual_prompt(inputs: dict[str, Any]) -> str:
     right = sanitize_visual_prompt(
         str(inputs.get("right_character") or ""), dialogue_script
     )
-    action = sanitize_visual_prompt(str(inputs.get("action") or ""), dialogue_script)
-    camera = sanitize_visual_prompt(str(inputs.get("camera") or ""), dialogue_script)
+    action = sanitize_visual_prompt(requested_motion(inputs, "action"), dialogue_script)
+    camera = sanitize_visual_prompt(requested_motion(inputs, "camera"), dialogue_script)
     if left:
         parts.append(f"First-frame left character identity and costume: {left}")
     if right:
@@ -1064,12 +1074,13 @@ def build_global_visual_prompt(inputs: dict[str, Any]) -> str:
     if camera:
         parts.append(f"Camera and composition: {camera}")
     parts.append(
-        "Use the uploaded first frame as the strict visual source. Preserve "
-        "both character identities, faces, hairstyles, costumes, body "
-        "proportions, left-right positions, environment, lighting, and "
-        "composition throughout. The active speaker uses subtle natural lip "
-        "motion synchronized to the supplied audio while the other character "
-        "listens naturally."
+        "Use the uploaded first frame as the starting visual reference. "
+        "Maintain recognizable character identities and visual continuity. "
+        "Follow the requested actions, transformations, camera movement, "
+        "scene transitions and lighting changes. Animate subjects and the "
+        "environment according to the scene. Synchronize lips only for "
+        "explicitly identified on-screen speech; offscreen narration and "
+        "background audio do not cause visible characters to speak."
     )
     parts.append(GLOBAL_NO_WRITING_GUARD)
     return "\n".join(parts)
@@ -1080,7 +1091,7 @@ def build_local_visual_prompts(inputs: dict[str, Any]) -> str:
 
     duration = int(inputs.get("duration_seconds") or 0) or 10
     timeline = sanitize_visual_prompt(
-        str(inputs.get("speaker_timeline") or ""),
+        str(inputs.get("speaker_timeline") or inputs.get("video_prompt") or ""),
         str(inputs.get("dialogue_script") or ""),
     )
     segments: list[str] = []
@@ -1096,16 +1107,19 @@ def build_local_visual_prompts(inputs: dict[str, Any]) -> str:
             segments.append(f"[0-{duration}s] {timeline}")
     if not segments:
         segments.append(
-            f"[0-{duration}s] The active speaker uses subtle natural lip "
-            "motion synchronized to the supplied audio while the other "
-            "character remains in place and listens naturally."
+            f"[0-{duration}s] Follow the requested scene with continuous natural motion."
         )
 
     identity_constraint = (
-        "Preserve the exact first-frame faces, hairstyles, costumes, body "
-        "proportions, left-right positions, environment, lighting, and "
-        "composition."
+        "Maintain recognizable identities and coherent visual continuity while "
+        "allowing the requested movement, transformations and scene changes. "
+        "Offscreen narration does not cause lip movement."
     )
+    dialogue_script = str(inputs.get("dialogue_script") or "")
+    for key in ("action", "camera"):
+        detail = sanitize_visual_prompt(requested_motion(inputs, key), dialogue_script)
+        if detail:
+            identity_constraint += f" {key.capitalize()}: {detail}"
     return "\n\n|\n\n".join(
         f"{segment.rstrip()} {identity_constraint}" for segment in segments
     )
@@ -1706,8 +1720,8 @@ async def start_dialogue_video_from_script(
     left_character: str = "",
     right_character: str = "",
     speaker_timeline: str = "",
-    action: str = "说话者自然张嘴并有小幅表情和手势；未说话者自然倾听",
-    camera: str = "固定中近景，轻微自然呼吸感，不切镜",
+    action: str = "",
+    camera: str = "",
     negative_prompt: str = "字幕，文字，水印，角色换位，身份变化，两人同时开口，口型错位，面部畸形，闪烁",
     width: int = 0,
     height: int = 0,
@@ -1775,8 +1789,8 @@ async def start_dialogue_video_from_script_url(
     left_character: str = "",
     right_character: str = "",
     speaker_timeline: str = "",
-    action: str = "说话者自然张嘴并有小幅表情和手势；未说话者自然倾听",
-    camera: str = "固定中近景，轻微自然呼吸感，不切镜",
+    action: str = "",
+    camera: str = "",
     negative_prompt: str = "字幕，文字，水印，角色换位，身份变化，两人同时开口，口型错位，面部畸形，闪烁",
     width: int = 0,
     height: int = 0,
@@ -1838,8 +1852,8 @@ async def start_ltx23_from_ready_media(
     left_character: str = "",
     right_character: str = "",
     speaker_timeline: str = "",
-    action: str = "说话者自然张嘴并有小幅表情和手势；未说话者自然倾听",
-    camera: str = "固定中近景，轻微自然呼吸感，不切镜",
+    action: str = "",
+    camera: str = "",
     negative_prompt: str = "字幕，文字，水印，角色换位，身份变化，两人同时开口，口型错位，面部畸形，闪烁",
     width: int = 0,
     height: int = 0,
