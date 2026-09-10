@@ -1,0 +1,4 @@
+# Keep the existing project's FastMCP and orchestrator dependencies.
+-r requirements.txt
+httpx>=0.27,<1
+pydantic>=2.8,<3

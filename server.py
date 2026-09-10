@@ -1836,6 +1836,129 @@ async def start_dialogue_video_from_script_url(
     return await submit_tts_pipeline(image_filename=image_filename, inputs=inputs)
 
 
+# Dedicated first/last-frame workflow. Existing single-image tools are retained.
+def keyframes_configuration() -> tuple[str, dict[str, Any]]:
+    workflow_id = os.getenv("LTX23_KEYFRAMES_WORKFLOW_ID", "").strip()
+    if not workflow_id or not workflow_id.isdigit():
+        raise ConfigurationError("请设置 LTX23_KEYFRAMES_WORKFLOW_ID 为新发布的首尾帧工作流 ID。")
+    path = Path(os.getenv("LTX23_KEYFRAMES_API_FILE", str(Path(__file__).with_name("ltx23_keyframes_api.json"))))
+    try:
+        workflow = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise ConfigurationError(f"无法读取首尾帧 API 文件：{path}") from exc
+    expected = {"61":"LoadImage", "301":"LoadImage", "310":"LTXVAddGuide",
+                "311":"LTXVAddGuide", "312":"LTXVCropGuides", "320":"CLIPTextEncode"}
+    for node, kind in expected.items():
+        if workflow.get(node, {}).get("class_type") != kind:
+            raise ConfigurationError(f"首尾帧 API 文件不匹配：节点 {node} 必须是 {kind}。")
+    edges = {("310","positive"):["91",0], ("310","negative"):["91",1],
+             ("310","latent"):["105",0], ("310","image"):["61",0],
+             ("311","positive"):["310",0], ("311","negative"):["310",1],
+             ("311","latent"):["310",2], ("311","image"):["301",0],
+             ("103","positive"):["311",0], ("103","negative"):["311",1],
+             ("107","video_latent"):["311",2], ("312","latent"):["109",0],
+             ("312","positive"):["311",0], ("312","negative"):["311",1],
+             ("126","samples"):["312",2]}
+    for (node,field), value in edges.items():
+        if workflow.get(node,{}).get("inputs",{}).get(field) != value:
+            raise ConfigurationError(f"首尾帧接线不匹配：{node}.{field}")
+    return workflow_id, workflow
+
+
+def keyframes_silent_wav(duration: float) -> bytes:
+    import io
+    import wave
+    buffer = io.BytesIO()
+    with wave.open(buffer, "wb") as wav:
+        wav.setnchannels(2)
+        wav.setsampwidth(2)
+        wav.setframerate(48000)
+        wav.writeframes(b"\0" * (int((duration + 0.1) * 48000) * 4))
+    return buffer.getvalue()
+
+
+@mcp.tool(annotations={"readOnlyHint": True, "destructiveHint": False,
+                       "idempotentHint": True, "openWorldHint": False})
+async def inspect_ltx23_keyframes() -> dict[str, Any]:
+    """检查本地首尾帧配置及关键接线，不提交生成任务，不消耗 RH 币。"""
+    workflow_id, workflow = keyframes_configuration()
+    return {"ok": True, "workflow_id": workflow_id, "node_count": len(workflow),
+            "start_image_node": "61", "end_image_node": "301",
+            "guide_nodes": ["310", "311"], "crop_guides_node": "312",
+            "remote_node_availability_verified": False,
+            "note": "本地接线检查通过；需在 RunningHub 打开并运行对应工作流确认节点兼容。"}
+
+
+@mcp.tool(meta={"openai/fileParams": ["start_image_file", "end_image_file"]},
+          annotations={"readOnlyHint": False, "destructiveHint": False,
+                       "idempotentHint": False, "openWorldHint": True})
+async def start_ltx23_keyframes(
+    start_image_file: OpenAIFile,
+    end_image_file: OpenAIFile,
+    video_prompt: str,
+    duration_seconds: int = 5,
+    fps: int = 24,
+    start_strength: float = 1.0,
+    end_strength: float = 1.0,
+    ltx_seed: int = 12345,
+) -> dict[str, Any]:
+    """首尾帧变形测试：上传同一人物的两个状态图，自动配等长静音，无字幕。会消耗 RH 币。通过 query_dialogue_pipeline 查询结果。仅首尾帧，不含中间帧控制。"""
+    if not 1 <= duration_seconds <= 5 or fps != 24:
+        raise ValueError("首尾帧测试版仅支持 1–5 秒、24fps；建议先使用 5 秒。")
+    if not all(0 < x <= 1 for x in (start_strength, end_strength)):
+        raise ValueError("首尾帧 strength 必须大于 0 且不超过 1。")
+    if not 0 <= ltx_seed <= 2**64 - 1:
+        raise ValueError("ltx_seed 必须为 uint64。")
+    if not video_prompt.strip():
+        raise ValueError("video_prompt 不能为空。")
+    workflow_id, workflow = keyframes_configuration()
+    settings = Settings.from_env()
+    client = RunningHubClient(settings)
+    start_name, end_name = await asyncio.gather(
+        upload_file_object(client, settings, start_image_file, expected_kind="image"),
+        upload_file_object(client, settings, end_image_file, expected_kind="image"),
+    )
+    audio_name = await client.upload_bytes(keyframes_silent_wav(duration_seconds),
+                                           "keyframes_silence.wav", "audio/wav")
+    values = [("61","image",start_name), ("301","image",end_name),
+              ("60","audio",audio_name), ("320","text",video_prompt.strip()+"\n"+GLOBAL_NO_WRITING_GUARD),
+              ("135","value",duration_seconds), ("62","value",fps),
+              ("310","frame_idx",0), ("311","frame_idx",-1),
+              ("310","strength",start_strength), ("311","strength",end_strength),
+              ("77","noise_seed",ltx_seed)]
+    nodes = [{"nodeId":n,"fieldName":f,"fieldValue":v} for n,f,v in values]
+    runtime = apply_workflow_overrides(workflow, nodes)
+    assert runtime["61"]["inputs"]["image"] == start_name
+    assert runtime["301"]["inputs"]["image"] == end_name
+    now = time.time()
+    preflight = {"ok":True, "workflowId":workflow_id,
+                 "startImage":start_name, "endImage":end_name,
+                 "guideFrames":[0,-1], "frameCount":round(duration_seconds*fps/8)*8+1,
+                 "localGraphValidated":True, "remoteGraphVerified":False}
+    record = PipelineRecord(pipeline_id=secrets.token_urlsafe(18), status="TTS_READY",
+        created_at=now, updated_at=now, image_filename=start_name, audio_filename=audio_name,
+        inputs={"video_prompt":video_prompt, "duration_seconds":duration_seconds, "fps":fps,
+                "auto_start_ltx":False, "_keyframes":True,
+                "_uploaded_image_filename":start_name, "_uploaded_end_image_filename":end_name,
+                "_ltx_submitted_node_info":nodes, "_ltx_submission_mode":"workflow",
+                "_ltx_workflow_preflight":preflight})
+    # Store only after submission: do not leave a TTS_READY record that could
+    # accidentally be resumed through the legacy one-image submission path.
+    async with _submit_lock:
+        task = await client.run_workflow(workflow_id=workflow_id, node_info_list=nodes,
+                 access_password=os.getenv("LTX23_KEYFRAMES_ACCESS_PASSWORD", ""))
+    record.ltx_task_id = str(task["taskId"])
+    record.status = "LTX_SUBMITTED"
+    record = await get_store(settings).put(record)
+    result = pipeline_summary(record)
+    result["generation_will_consume_credits"] = True
+    result["keyframes_preflight"] = preflight
+    return result
+
+
+finalize_openai_file_param_schema(start_ltx23_keyframes, "start_image_file", "end_image_file")
+
+
 @mcp.tool(
     meta={"openai/fileParams": ["image_file", "audio_file"]},
     annotations={
@@ -2069,6 +2192,10 @@ async def root(_: Request) -> JSONResponse:
             "mcp": "configured privately",
         }
     )
+
+
+from film_engine import register as register_full_film
+full_film_engine = register_full_film(mcp, globals())
 
 
 if __name__ == "__main__":

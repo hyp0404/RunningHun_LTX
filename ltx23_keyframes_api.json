@@ -1,0 +1,527 @@
+{
+  "62": {
+    "inputs": {
+      "value": 24
+    },
+    "class_type": "PrimitiveFloat",
+    "_meta": {
+      "title": "fps"
+    }
+  },
+  "86": {
+    "inputs": {
+      "text_encoder": "gemma_3_12B_it.safetensors",
+      "ckpt_name": "ltx-2.3-22b-distilled-1.1.safetensors",
+      "device": "default"
+    },
+    "class_type": "LTXAVTextEncoderLoader",
+    "_meta": {
+      "title": "Load LTXV Audio Text Encoder"
+    }
+  },
+  "320": {
+    "inputs": {
+      "text": "Locked camera. The same adult remains lying on the stone platform. Body volume changes continuously from the start image state to the end image state. Preserve the face, hairstyle, clothing and architecture. Natural real-time motion. No text or subtitles.",
+      "clip": [
+        "86",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "Positive: describe only the transition"
+    }
+  },
+  "4": {
+    "inputs": {
+      "text": "subtitles, captions, letters, logos, watermark, duplicate people, extra limbs, identity changes, costume changes, flicker, unintended scene cuts",
+      "clip": [
+        "86",
+        0
+      ]
+    },
+    "class_type": "CLIPTextEncode",
+    "_meta": {
+      "title": "CLIP Text Encode (Negative Prompt)"
+    }
+  },
+  "91": {
+    "inputs": {
+      "frame_rate": [
+        "62",
+        0
+      ],
+      "positive": [
+        "320",
+        0
+      ],
+      "negative": [
+        "4",
+        0
+      ]
+    },
+    "class_type": "LTXVConditioning",
+    "_meta": {
+      "title": "LTXVConditioning"
+    }
+  },
+  "68": {
+    "inputs": {
+      "ckpt_name": "ltx-2.3-22b-distilled-1.1.safetensors"
+    },
+    "class_type": "CheckpointLoaderSimple",
+    "_meta": {
+      "title": "Load Checkpoint"
+    }
+  },
+  "61": {
+    "inputs": {
+      "image": "80c4187336380a1d3af2ebee3e2b598d2be726feb55f3c7b1f0cab40028756fa.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "Load Image"
+    }
+  },
+  "65": {
+    "inputs": {
+      "TotalPixels": 0.4,
+      "alignment": "64(sd/kontext/wan)",
+      "images": [
+        "61",
+        0
+      ]
+    },
+    "class_type": "image_scale_pixel_v2",
+    "_meta": {
+      "title": "Base generation: 0.4 MP / one 2x upscale"
+    }
+  },
+  "135": {
+    "inputs": {
+      "value": 5
+    },
+    "class_type": "Float",
+    "_meta": {
+      "title": "Shot duration seconds (start with 5)"
+    }
+  },
+  "133": {
+    "inputs": {
+      "value": "round(a * b / 8) * 8 + 1",
+      "a": [
+        "135",
+        0
+      ],
+      "b": [
+        "62",
+        0
+      ]
+    },
+    "class_type": "SimpleMath+",
+    "_meta": {
+      "title": "Target seconds -> 8n+1 frames"
+    }
+  },
+  "100": {
+    "inputs": {
+      "value": [
+        "133",
+        0
+      ]
+    },
+    "class_type": "PrimitiveInt",
+    "_meta": {
+      "title": "number of frames"
+    }
+  },
+  "105": {
+    "inputs": {
+      "width": [
+        "65",
+        2
+      ],
+      "height": [
+        "65",
+        3
+      ],
+      "length": [
+        "100",
+        0
+      ],
+      "batch_size": 1
+    },
+    "class_type": "EmptyLTXVLatentVideo",
+    "_meta": {
+      "title": "EmptyLTXVLatentVideo"
+    }
+  },
+  "310": {
+    "class_type": "LTXVAddGuide",
+    "inputs": {
+      "positive": [
+        "91",
+        0
+      ],
+      "negative": [
+        "91",
+        1
+      ],
+      "vae": [
+        "68",
+        2
+      ],
+      "latent": [
+        "105",
+        0
+      ],
+      "image": [
+        "61",
+        0
+      ],
+      "frame_idx": 0,
+      "strength": 1.0
+    }
+  },
+  "301": {
+    "inputs": {
+      "image": "end_frame.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "END image: select the target state"
+    }
+  },
+  "311": {
+    "class_type": "LTXVAddGuide",
+    "inputs": {
+      "positive": [
+        "310",
+        0
+      ],
+      "negative": [
+        "310",
+        1
+      ],
+      "vae": [
+        "68",
+        2
+      ],
+      "latent": [
+        "310",
+        2
+      ],
+      "image": [
+        "301",
+        0
+      ],
+      "frame_idx": -1,
+      "strength": 1.0
+    }
+  },
+  "77": {
+    "inputs": {
+      "noise_seed": 604308129423484
+    },
+    "class_type": "RandomNoise",
+    "_meta": {
+      "title": "RandomNoise"
+    }
+  },
+  "280": {
+    "inputs": {
+      "sage_attention": "auto",
+      "allow_compile": false,
+      "model": [
+        "68",
+        0
+      ]
+    },
+    "class_type": "PathchSageAttentionKJ",
+    "_meta": {
+      "title": "Patch Sage Attention KJ"
+    }
+  },
+  "103": {
+    "inputs": {
+      "cfg": 1,
+      "model": [
+        "280",
+        0
+      ],
+      "positive": [
+        "311",
+        0
+      ],
+      "negative": [
+        "311",
+        1
+      ]
+    },
+    "class_type": "CFGGuider",
+    "_meta": {
+      "title": "CFG Guider"
+    }
+  },
+  "75": {
+    "inputs": {
+      "sampler_name": "euler_ancestral_cfg_pp"
+    },
+    "class_type": "KSamplerSelect",
+    "_meta": {
+      "title": "KSamplerSelect"
+    }
+  },
+  "76": {
+    "inputs": {
+      "sigmas": "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0"
+    },
+    "class_type": "ManualSigmas",
+    "_meta": {
+      "title": "ManualSigmas"
+    }
+  },
+  "134": {
+    "inputs": {
+      "value": 0
+    },
+    "class_type": "Float",
+    "_meta": {
+      "title": "Float"
+    }
+  },
+  "60": {
+    "inputs": {
+      "audio": "7dcdaa1d35f5516d24b743f2530e43a081476453b5d9c475ed095ff847988b00.flac",
+      "audioUI": ""
+    },
+    "class_type": "LoadAudio",
+    "_meta": {
+      "title": "Load audio: PREPAD to shot duration, then upload"
+    }
+  },
+  "63": {
+    "inputs": {
+      "start_index": [
+        "134",
+        0
+      ],
+      "duration": [
+        "135",
+        0
+      ],
+      "audio": [
+        "60",
+        0
+      ]
+    },
+    "class_type": "TrimAudioDuration",
+    "_meta": {
+      "title": "Trim Audio (duration 5-15 seconds)"
+    }
+  },
+  "84": {
+    "inputs": {
+      "ckpt_name": "ltx-2.3-22b-distilled-1.1.safetensors"
+    },
+    "class_type": "LTXVAudioVAELoader",
+    "_meta": {
+      "title": "Load LTXV Audio VAE"
+    }
+  },
+  "94": {
+    "inputs": {
+      "audio": [
+        "63",
+        0
+      ],
+      "audio_vae": [
+        "84",
+        0
+      ]
+    },
+    "class_type": "LTXVAudioVAEEncode",
+    "_meta": {
+      "title": "LTXV Audio VAE Encode"
+    }
+  },
+  "93": {
+    "inputs": {
+      "value": 0,
+      "width": [
+        "65",
+        2
+      ],
+      "height": [
+        "65",
+        3
+      ]
+    },
+    "class_type": "SolidMask",
+    "_meta": {
+      "title": "Create Solid Mask"
+    }
+  },
+  "97": {
+    "inputs": {
+      "samples": [
+        "94",
+        0
+      ],
+      "mask": [
+        "93",
+        0
+      ]
+    },
+    "class_type": "SetLatentNoiseMask",
+    "_meta": {
+      "title": "Set Latent Noise Mask"
+    }
+  },
+  "107": {
+    "inputs": {
+      "video_latent": [
+        "311",
+        2
+      ],
+      "audio_latent": [
+        "97",
+        0
+      ]
+    },
+    "class_type": "LTXVConcatAVLatent",
+    "_meta": {
+      "title": "Concat AV Latent"
+    }
+  },
+  "108": {
+    "inputs": {
+      "noise": [
+        "77",
+        0
+      ],
+      "guider": [
+        "103",
+        0
+      ],
+      "sampler": [
+        "75",
+        0
+      ],
+      "sigmas": [
+        "76",
+        0
+      ],
+      "latent_image": [
+        "107",
+        0
+      ]
+    },
+    "class_type": "SamplerCustomAdvanced",
+    "_meta": {
+      "title": "SamplerCustomAdvanced"
+    }
+  },
+  "109": {
+    "inputs": {
+      "av_latent": [
+        "108",
+        0
+      ]
+    },
+    "class_type": "LTXVSeparateAVLatent",
+    "_meta": {
+      "title": "Separate AV Latent"
+    }
+  },
+  "312": {
+    "class_type": "LTXVCropGuides",
+    "inputs": {
+      "positive": [
+        "311",
+        0
+      ],
+      "negative": [
+        "311",
+        1
+      ],
+      "latent": [
+        "109",
+        0
+      ]
+    }
+  },
+  "126": {
+    "inputs": {
+      "tile_size": 1024,
+      "overlap": 128,
+      "temporal_size": 1024,
+      "temporal_overlap": 4,
+      "samples": [
+        "312",
+        2
+      ],
+      "vae": [
+        "68",
+        2
+      ]
+    },
+    "class_type": "VAEDecodeTiled",
+    "_meta": {
+      "title": "VAE Decode (Tiled)"
+    }
+  },
+  "127": {
+    "inputs": {
+      "samples": [
+        "109",
+        1
+      ],
+      "audio_vae": [
+        "84",
+        0
+      ]
+    },
+    "class_type": "LTXVAudioVAEDecode",
+    "_meta": {
+      "title": "LTXV Audio VAE Decode"
+    }
+  },
+  "128": {
+    "inputs": {
+      "fps": [
+        "62",
+        0
+      ],
+      "bit_depth": 8,
+      "images": [
+        "126",
+        0
+      ],
+      "audio": [
+        "127",
+        0
+      ]
+    },
+    "class_type": "CreateVideo",
+    "_meta": {
+      "title": "Create Video"
+    }
+  },
+  "53": {
+    "inputs": {
+      "filename_prefix": "keyframes_test",
+      "format": "auto",
+      "codec": "auto",
+      "fw_video_preview": "",
+      "video": [
+        "128",
+        0
+      ]
+    },
+    "class_type": "SaveVideo",
+    "_meta": {
+      "title": "💾 Save Video"
+    }
+  }
+}

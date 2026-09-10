@@ -1,0 +1,8 @@
+{
+  "syntax": "passed",
+  "offline_tests": 3,
+  "openai_api_calls": "removed",
+  "runninghub_gpu": "not tested",
+  "original_project_startup": "not tested; original dependencies retained",
+  "workflow_json": "unchanged from full-film release"
+}
