@@ -848,7 +848,7 @@ def _fallback_filename(url: str, preferred: str, kind: str) -> str:
     candidate = Path(unquote(urlparse(url).path)).name
     if candidate:
         return candidate[:240]
-    return "input.png" if kind == "image" else "dialogue.wav"
+    return {"image": "input.png", "audio": "dialogue.wav", "video": "video.mp4"}.get(kind, "input.bin")
 
 
 def validate_media_type(filename: str, content_type: str, expected_kind: str) -> None:
@@ -862,6 +862,9 @@ def validate_media_type(filename: str, content_type: str, expected_kind: str) ->
     elif expected_kind == "audio":
         if not (mime.startswith("audio/") or suffix in audio_extensions):
             raise ValueError("对白附件必须是 WAV、MP3、M4A、AAC、FLAC、OGG 或 OPUS 音频。")
+    elif expected_kind == "video":
+        if not (mime.startswith("video/") or suffix in {".mp4", ".webm", ".mov", ".mkv", ".m4v"}):
+            raise ValueError("生成结果必须是 MP4、WebM、MOV、MKV 或 M4V 视频。")
     else:
         raise ValueError("未知媒体类型。")
 
