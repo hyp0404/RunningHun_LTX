@@ -1013,6 +1013,26 @@ def normalize_tts_dialogue(dialogue_script: str) -> str:
     return "\n".join(output)
 
 
+def film_tts_values(dialogue: str, voice: str) -> dict[str, Any]:
+    """One film shot uses slot A with its current speaker's voice.
+
+    Story names never enter the Role Bank parser. No speaker-map environment
+    variable is required, regardless of the number of story characters.
+    """
+    dialogue = ensure_text("dialogue", dialogue, max_length=12000)
+    voice = ensure_text("voice", voice, max_length=2000)
+    if not dialogue or not voice:
+        raise ValueError("当前镜头必须提供非空台词和说话人物的音色描述。")
+    role = os.getenv("QWEN_TTS_ROLE_A", "角色A").strip()
+    if not role or any(c in role for c in ":：\r\n"):
+        raise ValueError("QWEN_TTS_ROLE_A 必须匹配有效的 Role Bank 名称。")
+    return {
+        "script": "\n".join(f"{role}：{line.strip()}" for line in dialogue.splitlines() if line.strip()),
+        "voice_a": voice, "voice_b": "",
+        "sentence_pause": 0.1, "punctuation_pause": 0.1, "seed": 12345,
+    }
+
+
 def tts_values(
     *,
     dialogue_script: str,

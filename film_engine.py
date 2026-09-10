@@ -189,11 +189,34 @@ class Engine:
         mapping,_=await self.legacy['resolve_app_nodes'](settings,client,settings.qwen,self.legacy['TTS_ROLE_ALIASES'])
         if 'script' not in mapping or 'voice_a' not in mapping:raise ValueError('Qwen script and voice_a mappings are required')
         voice=next(c['voice'] for c in j['plan']['characters'] if c['id']==shot['speaker'])
-        values=self.legacy['tts_values'](dialogue_script='A: '+shot['dialogue'],voice_a_prompt=voice,voice_b_prompt='',sentence_pause=.1,punctuation_pause=.1,seed=12345)
+        values=self.legacy['film_tts_values'](shot['dialogue'],voice)
         nodes=self.legacy['make_node_info_list'](mapping,values,settings.qwen.extra_node_info)
         self.charge(j,'RunningHub TTS')
         task=await client.run_ai_app(settings.qwen,nodes)
         s['tts_task']=str(task['taskId']);s['stage']='TTS_WAIT';self.settled(j)
+
+    async def recover_failed_tts(self,j:dict):
+        """Recheck the provider before retiring a failed TTS task.
+
+        Unknown states/errors retain the task; successful/running tasks are
+        reused. Explicit recovery may resubmit a confirmed failure once.
+        """
+        i=j.get('shot_index',0)
+        if i>=len(j['shots']):return
+        s=j['shots'][i]
+        if s.get('stage')!='TTS_WAIT':return
+        task_id=s.get('tts_task')
+        if not task_id:raise ValueError('Missing TTS task ID; inspect provider history before recovery.')
+        state,urls,reason=await self.rh_state(task_id,'audio')
+        if state=='FAILED':
+            s.setdefault('tts_failure_history',[]).append({'task_id':task_id,'reason':reason})
+            s.pop('tts_task',None)
+            s.pop('audio_url',None)
+            s['stage']='AUDIO'
+        elif state=='SUCCESS':
+            if not urls:raise ValueError('Successful TTS task returned no audio URL; refusing to resubmit.')
+            s['audio_url']=urls[0];s['stage']='AUDIO_PREP'
+        # Other states retain TTS_WAIT and the original task ID.
 
     async def submit_video(self,j:dict,s:dict,shot:dict,d:Path):
         wid,graph=self.workflow(shot['mode'])
@@ -482,6 +505,7 @@ def register(mcp,legacy):
         j=engine.load(job_id)
         if j['status']!='NEEDS_ATTENTION':raise ValueError('Job is not paused')
         if j.get('pending_external') and not allow_repeat_uncertain_request:return {'ok':False,'error':'Check RunningHub history before repeating the uncertain request.'}
+        await engine.recover_failed_tts(j)
         j.pop('pending_external',None);j['status']='RUNNING';j['error']='';engine.save(j);launch(job_id)
         return engine.summary(j)
 
