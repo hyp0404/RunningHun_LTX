@@ -949,6 +949,70 @@ async def upload_url(
     return await client.upload_bytes(content, filename, content_type)
 
 
+def normalize_tts_dialogue(dialogue_script: str) -> str:
+    """Map public speaker aliases to the configured Qwen Role Bank names.
+
+    QWEN_TTS_ROLE_A/B must exactly match the workflow's Role Bank.
+    Named speakers require an explicit QWEN_TTS_SPEAKER_MAP JSON mapping;
+    never infer voices from order of appearance (shots may contain only B).
+    Unlabelled single-speaker text uses QWEN_TTS_DEFAULT_ROLE (A by default).
+    """
+    role_a = os.getenv("QWEN_TTS_ROLE_A", "角色A").strip()
+    role_b = os.getenv("QWEN_TTS_ROLE_B", "角色B").strip()
+    if (not role_a or not role_b or role_a == role_b
+            or any(c in role_a + role_b for c in ":：\r\n")):
+        raise ValueError("QWEN_TTS_ROLE_A/B 必须为不同的有效 Role Bank 名称。")
+    aliases = {}
+    for name in ("A", "角色A", "人物A", "speakerA", "speaker A", "c1", role_a):
+        aliases[name.casefold()] = role_a
+    for name in ("B", "角色B", "人物B", "speakerB", "speaker B", "c2", role_b):
+        key = name.casefold()
+        if key in aliases and aliases[key] != role_b:
+            raise ValueError("QWEN_TTS_ROLE_A/B 与保留角色别名冲突。")
+        aliases[key] = role_b
+    try:
+        custom = json.loads(os.getenv("QWEN_TTS_SPEAKER_MAP", "{}"))
+    except (ValueError, TypeError) as exc:
+        raise ValueError("QWEN_TTS_SPEAKER_MAP 必须是 JSON 对象。") from exc
+    if not isinstance(custom, dict):
+        raise ValueError("QWEN_TTS_SPEAKER_MAP 必须是 JSON 对象。")
+    for name, target in custom.items():
+        if not isinstance(target, str) or not name.strip():
+            raise ValueError("QWEN_TTS_SPEAKER_MAP 必须使用非空角色名和字符串目标。")
+        resolved = aliases.get(target.strip().casefold())
+        if resolved is None:
+            raise ValueError("角色映射目标必须是 A、B 或配置的 Role Bank 名称。")
+        key = name.strip().casefold()
+        if key in aliases and aliases[key] != resolved:
+            raise ValueError("不能覆盖已有角色别名的音色映射。")
+        aliases[key] = resolved
+    default = aliases.get(os.getenv("QWEN_TTS_DEFAULT_ROLE", "A").strip().casefold())
+    if default is None:
+        raise ValueError("QWEN_TTS_DEFAULT_ROLE 必须是已配置的角色。")
+    lines = [line.strip() for line in dialogue_script.splitlines() if line.strip()]
+    labelled = any(re.match(r"^[^:：\n]+[:：]", line) for line in lines)
+    output = []
+    for line in lines:
+        match = re.match(r"^([^:：\n]+)[:：]\s*(.*)$", line)
+        if match:
+            name, utterance = match.groups()
+            role = aliases.get(name.strip().casefold())
+            if role is None:
+                raise ValueError(
+                    f"未知 TTS 角色 {name.strip()!r}；请在 QWEN_TTS_SPEAKER_MAP 中映射到 A/B。"
+                )
+        else:
+            if labelled:
+                raise ValueError("带角色对白的每一行都必须包含角色前缀。")
+            role, utterance = default, line
+        if not utterance.strip():
+            raise ValueError("TTS 角色后缺少台词。")
+        output.append(f"{role}：{utterance.strip()}")
+    if not output:
+        raise ValueError("dialogue_script 不能为空；无对白镜头应跳过 TTS。")
+    return "\n".join(output)
+
+
 def tts_values(
     *,
     dialogue_script: str,
@@ -968,7 +1032,7 @@ def tts_values(
     if seed < -1:
         raise ValueError("tts_seed 必须为 -1 或非负整数。")
     return {
-        "script": dialogue_script,
+        "script": normalize_tts_dialogue(dialogue_script),
         "voice_a": ensure_text("voice_a_prompt", voice_a_prompt, max_length=2000),
         "voice_b": ensure_text("voice_b_prompt", voice_b_prompt, max_length=2000),
         "sentence_pause": sentence_pause if sentence_pause > 0 else None,
