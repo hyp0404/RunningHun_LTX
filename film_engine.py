@@ -23,6 +23,98 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, ConfigDict
 from starlette.responses import FileResponse, JSONResponse
 
+PROMPT_FIX_VERSION = '2026-09-17.1'
+
+
+def positive_prompt_targets(graph: dict) -> list[tuple[str, str]]:
+    """Find text encoders on the actual positive-conditioning path, not by ID.
+
+    Stop at PromptRelayEncode: its model/CLIP inputs are not prompt sources.
+    Refuse unknown conditioning layouts instead of silently retaining a demo.
+    """
+    roots = [n.get('inputs', {}).get('positive') for n in graph.values()
+             if n.get('class_type') in {'CFGGuider', 'BasicGuider', 'KSampler', 'KSamplerAdvanced'}]
+    targets = set()
+    seen = set()
+
+    def walk(edge):
+        if not isinstance(edge, list) or len(edge) != 2:
+            raise ValueError('Positive conditioning must be a connected node')
+        node_id, slot = str(edge[0]), edge[1]
+        if (node_id, slot) in seen:return
+        seen.add((node_id, slot))
+        node = graph.get(node_id, {})
+        kind = node.get('class_type')
+        inputs = node.get('inputs', {})
+        if kind == 'PromptRelayEncode':
+            if slot != 1:raise ValueError('Unexpected PromptRelay conditioning output')
+            for field in ('global_prompt', 'local_prompts'):
+                if field not in inputs:raise ValueError('Incomplete PromptRelay inputs')
+                targets.add((node_id, field))
+        elif kind == 'CLIPTextEncode':
+            if slot != 0 or 'text' not in inputs:raise ValueError('Invalid CLIPTextEncode output')
+            targets.add((node_id, 'text'))
+        elif kind in {'LTXVConditioning', 'LTXVAddGuide', 'LTXVCropGuides'}:
+            if slot != 0:raise ValueError('Positive path uses a non-positive conditioning output')
+            walk(inputs.get('positive'))
+        elif kind == 'ConditioningCombine':
+            walk(inputs.get('conditioning_1'));walk(inputs.get('conditioning_2'))
+        else:
+            raise ValueError(f'Unsupported positive-conditioning node {node_id}: {kind}; inspect workflow wiring')
+
+    if not roots:raise ValueError('No supported positive-conditioning consumer found')
+    for root in roots:walk(root)
+    return sorted(targets)
+
+
+def film_visual_prompts(legacy: dict, job: dict, state: dict, shot: dict) -> tuple[str, str]:
+    """Use the same speech separation as dialogue tools; retry replaces motion.
+
+    Remove punctuation-insensitive literal matches too: storyboard prose often
+    omits the comma in a line such as 闭气，别动. Single-character lines are
+    removed only when quoted or immediately following a speaking verb.
+    """
+    dialogue = shot.get('dialogue', '')
+    script = f"角色A：{dialogue}" if dialogue else ''
+    utterances = [x for x in re.split(r'[，,。！？!?；;\n]+', dialogue) if x.strip()]
+    compact = re.sub(r'[\s，,。！？!?；;：:…]', '', dialogue)
+
+    def clean(value):
+        value = str(value or '')
+        for line in sorted(set(utterances + [compact]), key=len, reverse=True):
+            line = line.strip()
+            if len(line) >= 2:
+                pattern = r'[\s，,。！？!?；;：:…]*'.join(map(re.escape, line))
+                value = re.sub(pattern, '', value)
+            elif line:
+                value = re.sub(r'(?:说|喊|喝|道|叫)[：:\s“「\"\']*' + re.escape(line), '做出说话动作', value)
+        return legacy['sanitize_visual_prompt'](value, script)
+
+    cast = [c for c in job['plan']['characters'] if c['id'] in shot['cast']]
+    location = next(l['appearance'] for l in job['plan']['locations'] if l['id'] == shot['location'])
+    scene = [job['plan']['style'], location]
+    scene += [c['appearance'] for c in cast]
+    retry = state.get('retry_instruction', '').strip()
+    if retry:
+        # A complete corrective visual direction replaces conflicting originals.
+        action, camera = clean(retry), ''
+    else:
+        scene += [shot['start']]
+        if shot.get('end'):scene += ['Required final visual state: ' + shot['end']]
+        action, camera = clean(shot['action']), clean(shot['camera'])
+    if dialogue:
+        speaker = next(c['appearance'] for c in cast if c['id'] == shot['speaker'])
+        speech = 'Only the person described as ' + clean(speaker) + ' moves their lips in sync with the supplied voice audio. Other people keep their mouths closed.'
+    else:
+        speech = 'All visible people keep their mouths closed.'
+    inputs = {'video_prompt': clean('\n'.join(scene)), 'action': action + '\n' + speech,
+              'camera': camera, 'dialogue_script': script, 'duration_seconds': shot['duration'],
+              'speaker_timeline': action + '\n' + speech}
+    global_prompt = legacy['build_global_visual_prompt'](inputs)
+    local_prompt = legacy['build_local_visual_prompts'](inputs)
+    legacy['validate_prompt_separation'](inputs, global_prompt, local_prompt)
+    return global_prompt, local_prompt
+
 
 class Character(BaseModel):
     id: str = Field(pattern=r'^c[0-9]+$')
@@ -146,7 +238,7 @@ class Engine:
     def workflow(self,kind: str) -> tuple[str,dict]:
         wid=os.getenv('FILM_'+kind.upper()+'_WORKFLOW_ID','').strip()
         if not wid.isdigit():raise ValueError(f'Configure FILM_{kind.upper()}_WORKFLOW_ID')
-        path=Path(__file__).with_name(f'film_{kind}_api.json')
+        path=Path(os.getenv('FILM_'+kind.upper()+'_API_FILE', str(Path(__file__).with_name(f'film_{kind}_api.json'))))
         graph=json.loads(path.read_text())
         return wid,graph
 
@@ -220,17 +312,25 @@ class Engine:
 
     async def submit_video(self,j:dict,s:dict,shot:dict,d:Path):
         wid,graph=self.workflow(shot['mode'])
+        targets=positive_prompt_targets(graph)
+        global_prompt,local_prompt=film_visual_prompts(self.legacy,j,s,shot)
         image=await self.upload(d/'start.png','image/png')
         audio=await self.upload(d/'audio.wav','audio/wav')
-        descriptors=' '.join(c['id']+': '+c['appearance'] for c in j['plan']['characters'] if c['id'] in shot['cast'])
-        speech=(f"Only {shot['speaker']} speaks, synchronize their lips to the supplied speech audio; other visible people keep mouths closed." if shot['dialogue'] else 'No speech, keep mouths closed.')
-        prompt=' '.join([j['plan']['style'],descriptors,shot['action'],shot['camera'],speech,'Normal playback speed. No text, subtitles or watermarks.',s.get('retry_instruction','')])
-        vals=[('61','image',image),('60','audio',audio),('320','text',prompt),('135','value',shot['duration']),('62','value',24),('77','noise_seed',j['seed']+j['shot_index']*100+s['attempt'])]
+        seed=j['seed']+j['shot_index']*100+s['attempt']
+        vals=[('61','image',image),('60','audio',audio),('135','value',shot['duration']),('62','value',24),('77','noise_seed',seed)]
+        vals += [(node,field,local_prompt if field=='local_prompts' else global_prompt) for node,field in targets]
+        if graph.get('80',{}).get('class_type')=='RandomNoise':
+            vals.append(('80','noise_seed',(seed+1) % (2**63)))
         if shot['mode']=='flf':
             vals += [('301','image',await self.upload(d/'end.png','image/png')),('310','frame_idx',0),('311','frame_idx',-1),('310','strength',1.0),('311','strength',1.0)]
         nodes=[{'nodeId':n,'fieldName':f,'fieldValue':v} for n,f,v in vals]
         self.legacy['apply_workflow_overrides'](graph,nodes)
         s['submitted_nodes']=nodes
+        s['prompt_fix_version']=PROMPT_FIX_VERSION
+        s['prompt_targets']=[list(t) for t in targets]
+        (d/'visual_prompt.json').write_text(json.dumps({'version':PROMPT_FIX_VERSION,
+            'targets':s['prompt_targets'],'global_prompt':global_prompt,'local_prompt':local_prompt,
+            'attempt':s['attempt']},ensure_ascii=False,indent=2))
         settings=self.legacy['Settings'].from_env();client=self.legacy['RunningHubClient'](settings)
         self.charge(j,'RunningHub LTX')
         task=await client.run_workflow(workflow_id=wid,node_info_list=nodes,access_password=os.getenv('FILM_'+shot['mode'].upper()+'_ACCESS_PASSWORD',''))
@@ -304,17 +404,21 @@ class Engine:
             if not shutil.which(binary):missing.append(binary)
         if os.getenv('FILM_PUBLIC_BASE_URL') and not os.getenv('FILM_PUBLIC_BASE_URL','').startswith('https://'):
             missing.append('FILM_PUBLIC_BASE_URL must use HTTPS')
+        workflows={}
         for kind in ['i2v','flf']:
-            try:self.workflow(kind)
-            except (ValueError,OSError):missing.append(f'FILM_{kind.upper()}_WORKFLOW_ID / API file')
+            try:
+                wid,graph=self.workflow(kind)
+                workflows[kind]={'workflow_id':wid,'positive_prompt_targets':positive_prompt_targets(graph)}
+            except (ValueError,OSError) as exc:missing.append(f'FILM_{kind.upper()}: {exc}')
         if len(os.getenv('FILM_DOWNLOAD_SECRET',''))<32:missing.append('FILM_DOWNLOAD_SECRET >=32 characters')
-        return {'ok':not missing,'missing':missing,'remote_compatibility_verified':False,
+        return {'ok':not missing,'missing':missing,'remote_compatibility_verified':False,'prompt_fix_version':PROMPT_FIX_VERSION,'workflows':workflows,
                 'planning_images_review':'Provided in the current ChatGPT conversation; server makes no OpenAI API calls.',
                 'costs':['RunningHub TTS/video','Hosting/storage as charged by your host'],
                 'limits':'5–120 seconds, <=24 shots, one speaker per shot; no guarantee of action or lip-sync accuracy'}
 
     def summary(self,j:dict) -> dict:
         result={k:j.get(k) for k in ['id','status','stage','shot_index','error','external_calls','target_seconds','updated_at']}
+        result['prompt_fix_version']=PROMPT_FIX_VERSION
         result['shot_count']=len(j['shots'])
         result['shots']=[{'index':i,'stage':s['stage'],'attempt':s.get('attempt',0),'review':s.get('review')} for i,s in enumerate(j['shots'])]
         d=self.directory(j['id'])
