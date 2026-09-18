@@ -23,7 +23,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, ConfigDict
 from starlette.responses import FileResponse, JSONResponse
 
-PROMPT_FIX_VERSION = '2026-09-17.1'
+PROMPT_FIX_VERSION = '2026-09-17.2'
 
 
 def positive_prompt_targets(graph: dict) -> list[tuple[str, str]]:
@@ -191,11 +191,23 @@ def allocate_durations(total: int) -> list[int]:
 
 
 async def command(*args: str, timeout: int = 240) -> bytes:
-    proc = await asyncio.create_subprocess_exec(*map(str,args), stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    args = list(map(str, args))
+    if Path(args[0]).name == 'ffmpeg':
+        # Bound decoder, filter and encoder threads on small hosting instances.
+        # Each caller supplies one output as its final argument.
+        args = [args[0], '-threads', '1', '-filter_threads', '1',
+                '-filter_complex_threads', '1', *args[1:-1], '-threads', '1', args[-1]]
+    proc = await asyncio.create_subprocess_exec(*args, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
         stdout,stderr = await asyncio.wait_for(proc.communicate(), timeout)
+    except asyncio.TimeoutError as exc:
+        if proc.returncode is None:proc.kill()
+        await proc.communicate()
+        raise RuntimeError(f'{Path(args[0]).name} exceeded {timeout}s; preserve source media and retry processing only') from exc
     except BaseException:
-        proc.kill(); await proc.wait(); raise
+        if proc.returncode is None:proc.kill()
+        await proc.communicate()
+        raise
     if proc.returncode:
         # ffmpeg receives only locally constructed paths, never secrets.
         raise RuntimeError(stderr.decode(errors='replace')[-1000:])
@@ -427,7 +439,7 @@ class Engine:
         i=j['shot_index']
         if i<len(j['shots']):
             prefix=f'shot{i:03d}/'
-            result['review_assets']={name:self.link(j,prefix+name) for name in ['start.png','end.png','first.png','quarter.png','middle.png','threequarter.png','last.png','clip.mp4'] if (d/prefix/name).is_file()}
+            result['review_assets']={name:self.link(j,prefix+name) for name in ['start.png','end.png','first.png','quarter.png','middle.png','threequarter.png','last.png','clip.mp4','raw.mp4'] if (d/prefix/name).is_file()}
             result['current_shot']=j['plan']['shots'][i]
         result['next_action']={'WAITING_ASSETS':'Create the requested reference frame(s) in ChatGPT and call upload_film_frame.',
             'WAITING_REVIEW':'Download/view review_assets in ChatGPT, inspect the actual images/video, then call submit_film_review with concrete findings.',
@@ -475,7 +487,20 @@ class Engine:
                 else:raise ValueError('Video failed after retry limit: '+reason)
             elif state=='SUCCESS':s['video_url']=urls[0];s['stage']='NORMALIZE';self.save(j)
         elif s['stage']=='NORMALIZE':
-            await self.download(s['video_url'],sd/'raw.mp4','video')
+            # Reuse a complete source file after a worker restart. A partial
+            # download is never treated as a valid checkpoint.
+            ready=False
+            if (sd/'raw.mp4').is_file():
+                try:
+                    info=await probe(sd/'raw.mp4')
+                    ready=any(x.get('codec_type')=='video' for x in info.get('streams',[]))
+                except (ValueError,RuntimeError):pass
+            if not ready:
+                await self.download(s['video_url'],sd/'raw.download','video')
+                info=await probe(sd/'raw.download')
+                if not any(x.get('codec_type')=='video' for x in info.get('streams',[])):
+                    raise ValueError('Downloaded source has no video stream')
+                os.replace(sd/'raw.download',sd/'raw.mp4')
             await self.normalize(sd,shot['duration'])
             s['stage']='REVIEW';j['status']='WAITING_REVIEW';self.save(j)
 
@@ -617,7 +642,7 @@ def register(mcp,legacy):
     async def film_download(request):
         try:
             job_id=request.path_params['job_id'];name=request.path_params['asset']
-            allowed=name in {'final.mp4','storyboard.json','review_report.json'} or re.fullmatch(r'shot[0-9]{3}/(start|end|first|quarter|middle|threequarter|last)\.png|shot[0-9]{3}/clip\.mp4',name)
+            allowed=name in {'final.mp4','storyboard.json','review_report.json'} or re.fullmatch(r'shot[0-9]{3}/(start|end|first|quarter|middle|threequarter|last)\.png|shot[0-9]{3}/(?:clip|raw)\.mp4',name)
             if not allowed:raise ValueError()
             expires=int(request.query_params['expires'])
             if expires<time.time():raise ValueError()
